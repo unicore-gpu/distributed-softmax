@@ -1,0 +1,40 @@
+[package]
+name = "worker-rs"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "worker"
+path = "src/main.rs"
+
+[features]
+default = ["cuda"]
+# Disable GPU with --no-default-features for CPU-only / CI builds
+cuda = ["dep:cudarc"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# Redis
+redis = { version = "0.27", features = ["tokio-comp", "aio", "connection-manager"] }
+
+# ZMQ (socket lives on a dedicated std::thread)
+zmq = "0.10"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+
+# GPU (enabled by default; disable with --no-default-features)
+cudarc = { version = "0.19", optional = true, features = ["nvrtc", "nccl", "cuda-version-from-build-system"] }
+once_cell = "1"
+
+[build-dependencies]
+# nothing — no proto generation needed for the worker

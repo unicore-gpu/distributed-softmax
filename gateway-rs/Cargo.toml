@@ -1,0 +1,52 @@
+[package]
+name = "gateway-rs"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "gateway"
+path = "src/main.rs"
+
+[features]
+default = ["cuda"]
+# Disable GPU with --no-default-features for CPU-only / CI builds
+cuda = ["dep:cudarc"]
+
+[dependencies]
+# GPU aggregation (optional — cudarc uses dynamic-loading by default, so no
+# CUDA libraries are needed at *build* time; they are loaded at runtime)
+cudarc = { version = "0.19", optional = true, features = ["nvrtc", "cuda-version-from-build-system"] }
+# gRPC / protobuf
+tonic = "0.12"
+prost = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+# Redis (async, with connection manager)
+redis = { version = "0.27", features = ["tokio-comp", "aio", "connection-manager"] }
+
+# ZMQ (bindings to libzmq; socket lives on a dedicated thread)
+zmq = "0.10"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Concurrent hash map for per-job state
+dashmap = "6"
+
+# Structured logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async trait support (for dyn Publisher)
+async-trait = "0.1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+[build-dependencies]
+tonic-build = "0.12"

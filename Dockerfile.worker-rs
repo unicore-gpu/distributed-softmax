@@ -1,0 +1,48 @@
+# ── Build stage ──────────────────────────────────────────────────────────────
+# Full CUDA devel image: nvrtc.h, libcuda stub, Rust toolchain.
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    pkg-config \
+    libzmq3-dev \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+# Cache dependency compilation.
+COPY worker-rs/Cargo.toml ./worker-rs/Cargo.toml
+RUN mkdir -p worker-rs/src && echo 'fn main(){}' > worker-rs/src/main.rs
+RUN cd worker-rs && cargo build --release 2>/dev/null || true
+RUN rm worker-rs/src/main.rs
+
+# Copy kernels and source, then do the real build.
+COPY worker-rs/kernels ./worker-rs/kernels
+COPY worker-rs/src     ./worker-rs/src
+RUN cd worker-rs && cargo build --release
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+# CUDA runtime image includes libcuda.so (from the driver via volume mount)
+# and libnvrtc.so for JIT kernel compilation at runtime.
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libzmq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/worker-rs/target/release/worker /usr/local/bin/worker
+
+ENV RUST_LOG=info
+ENV TRANSPORT=zmq
+ENV REDIS_HOST=redis
+ENV REDIS_PORT=6379
+ENV ZMQ_PULL_ENDPOINT=ipc:///tmp/softmax_tasks
+ENV NUM_WORKERS=4
+ENV CUDA_DEVICE=0
+
+ENTRYPOINT ["/usr/local/bin/worker"]

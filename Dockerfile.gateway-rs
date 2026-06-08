@@ -1,0 +1,60 @@
+# ── Build stage ──────────────────────────────────────────────────────────────
+# Full CUDA devel image: nvrtc.h for JIT kernel compilation at runtime.
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    pkg-config \
+    protobuf-compiler \
+    libzmq3-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+# Cache dependency compilation.
+COPY gateway-rs/Cargo.toml gateway-rs/Cargo.lock* ./gateway-rs/
+COPY proto ./proto/
+
+RUN mkdir -p gateway-rs/src && echo 'fn main(){}' > gateway-rs/src/main.rs
+RUN cargo build --release --manifest-path gateway-rs/Cargo.toml 2>/dev/null || true
+RUN rm gateway-rs/src/main.rs
+
+# Copy real source + CUDA kernels, then build.
+COPY gateway-rs/src      ./gateway-rs/src
+COPY gateway-rs/build.rs ./gateway-rs/build.rs
+COPY gateway-rs/kernels  ./gateway-rs/kernels
+
+RUN cargo build --release --manifest-path gateway-rs/Cargo.toml
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+# CUDA runtime image includes libnvrtc.so for JIT kernel compilation.
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libzmq5 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/gateway-rs/target/release/gateway /app/gateway
+
+ENV GATEWAY_ADDR=0.0.0.0:50051
+ENV REDIS_HOST=redis
+ENV REDIS_PORT=6379
+ENV TRANSPORT=zmq
+ENV ZMQ_PUSH_ENDPOINT=tcp://0.0.0.0:5560
+ENV NUM_SLICES=4
+ENV SLICE_TIMEOUT_MS=30000
+ENV RUST_LOG=info
+
+EXPOSE 50051 5560
+
+CMD ["/app/gateway"]

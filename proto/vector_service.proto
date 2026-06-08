@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package vector;
+
+service VectorService {
+  rpc SubmitTask(TaskRequest) returns (TaskResponse);
+  rpc GetResult(ResultRequest) returns (ResultResponse);
+}
+
+message TaskRequest {
+  string job_id = 1;
+  string task = 2;
+  repeated float vector = 3;
+}
+
+message TaskResponse {
+  string message = 1;
+  repeated float result = 2;
+}
+
+message ResultRequest {
+  string job_id = 1;
+}
+
+message ResultResponse {
+  string job_id = 1;
+  string status = 2;  // "pending", "running", "ready", "failed"
+  repeated float result = 3;
+  string message = 4;  // Optional error message or additional info
+  int32 completed_slices = 5;  // Progress tracking
+  int32 total_slices = 6;      // Progress tracking
+}

@@ -1,0 +1,81 @@
+# ============================================================================
+# Dockerfile.gateway  —  Plan B: Gateway-only image (no Redis, NATS, Python)
+#
+# Produces a lean image containing only the C++ gRPC gateway binary and its
+# runtime C++ dependencies.  Redis and NATS run as separate official images
+# (see docker-compose.full.yml).
+# ============================================================================
+
+# ── Build stage ──────────────────────────────────────────────────────────────
+FROM nvidia/cuda:12.6.1-devel-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git pkg-config wget curl unzip \
+    libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
+    libgrpc-dev libgrpc++-dev libhiredis-dev \
+    libssl-dev zlib1g-dev libc-ares-dev nlohmann-json3-dev \
+    libzmq3-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+RUN git clone --depth 1 https://github.com/sewenew/redis-plus-plus.git && \
+    cd redis-plus-plus && mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DREDIS_PLUS_PLUS_BUILD_SHARED=ON -DCMAKE_CXX_STANDARD=17 \
+        -DREDIS_PLUS_PLUS_BUILD_TEST=OFF && \
+    make -j$(nproc) && make install && ldconfig
+
+RUN git clone --depth 1 https://github.com/nats-io/nats.c.git && \
+    cd nats.c && mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make -j$(nproc) && make install && ldconfig
+
+WORKDIR /app
+
+COPY proto /app/proto
+RUN mkdir -p generated && \
+    protoc --cpp_out=generated --grpc_out=generated \
+    --plugin=protoc-gen-grpc=$(which grpc_cpp_plugin) \
+    --proto_path=proto proto/vector_service.proto
+
+COPY server /app/server
+RUN cmake -S server -B build -DUSE_RABBIT=OFF -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build -j$(nproc)
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libprotobuf-dev libgrpc++-dev libhiredis-dev \
+    libssl-dev ca-certificates curl \
+    libzmq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/lib/libredis++.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libnats*.so*   /usr/local/lib/
+COPY --from=builder /app/build/gateway_server     /app/gateway_server
+
+RUN ldconfig
+
+# Environment defaults — override at runtime or via docker-compose
+ENV GATEWAY_ADDR=0.0.0.0:50051
+ENV NATS_URL=nats://nats:4222
+ENV REDIS_HOST=redis
+ENV REDIS_PORT=6379
+
+EXPOSE 50051
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:50051/ || exit 1
+
+CMD ["/app/gateway_server"]

@@ -1,0 +1,53 @@
+# Vector Service .gitignore
+# Prevents committing generated/build files
+
+# Build artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.o
+*.so
+*.dylib
+*.dll
+gateway_server
+
+# Generated protobuf files
+generated/
+*_pb2.py
+*_pb2_grpc.py
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+
+# System files
+.DS_Store
+Thumbs.db
+*.log
+dump.rdb
+nohup.out
+
+# Temporary files
+*.tmp
+*.temp
+core
+
+# Docker artifacts
+*.tar.gz
+*.tar
+build.log
+
+# Rust build artifacts
+target/
+worker-rs/target/
+**/*.rs.bk
+Cargo.lock

@@ -1,0 +1,77 @@
+# ============================================================================
+# docker-compose.full.yml  —  Coordinator-node deployment (Rust gateway + Redis)
+#
+# Coordinator node (no GPU required):
+#   redis   — official Redis 7 image
+#   gateway — Rust gRPC gateway (Dockerfile.gateway-rs)
+#
+# Worker nodes (GPU required, deployed separately on each GPU host):
+#   docker run -d --gpus all \
+#     -e TRANSPORT=zmq \
+#     -e ZMQ_PULL_ENDPOINT=tcp://<coordinator-ip>:5560 \
+#     -e REDIS_HOST=<coordinator-ip> \
+#     worker-rs:latest
+#
+# Only the gRPC port (50051) and the ZMQ task port (5560) are published to the
+# host. Redis stays inside the docker network unless you publish it explicitly.
+# ============================================================================
+
+version: '3.8'
+
+networks:
+  softmax-internal:
+    driver: bridge
+
+volumes:
+  redis-data:
+
+services:
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: softmax-redis
+    command: >
+      redis-server
+        --appendonly yes
+        --maxclients 10000
+        --tcp-backlog 511
+        --tcp-keepalive 300
+        --save ""
+    volumes:
+      - redis-data:/data
+    networks:
+      - softmax-internal
+    # Publish 6379 only if remote workers connect over the public network
+    # ports:
+    #   - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ── Gateway (Rust) ───────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway-rs
+    container_name: softmax-gateway
+    environment:
+      - TRANSPORT=zmq
+      - GATEWAY_ADDR=0.0.0.0:50051
+      - ZMQ_PUSH_ENDPOINT=tcp://0.0.0.0:5560
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RUST_LOG=info
+    ports:
+      - "50051:50051"   # gRPC — clients connect here
+      - "5560:5560"     # ZMQ PUSH — remote workers PULL from here
+    networks:
+      - softmax-internal
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
