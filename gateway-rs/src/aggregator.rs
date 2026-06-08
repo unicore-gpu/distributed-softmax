@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use tracing::{error, info, warn};
+use tokio::time::{timeout, Instant};
+use tracing::{info, warn};
 
 use crate::config::RedisConfig;
 use crate::redis_manager::RedisManager;
@@ -61,8 +62,11 @@ impl ResultAggregator {
             redis,
             notifier,
             slice_timeout: Duration::from_millis(ms),
+            // Process-wide GPU aggregator, initialized once and shared across
+            // requests (was previously re-created — CUDA init + NVRTC compile —
+            // on every call).
             #[cfg(feature = "cuda")]
-            gpu: GpuAggregator::try_new(0).map(Arc::new),
+            gpu: crate::gpu_aggregator::global(0),
         }
     }
 
@@ -100,44 +104,55 @@ impl ResultAggregator {
         total_slices: usize,
     ) -> Result<Vec<SliceStats>> {
         let mut stats: Vec<SliceStats> = (0..total_slices).map(|_| SliceStats::default()).collect();
+        let mut have = vec![false; total_slices];
+        let mut remaining = total_slices;
 
-        // Register before pre-scanning Redis to avoid missing pub/sub events.
-        self.notifier.register_job(job_id, total_slices);
+        // Register before the first read so a notification for a slice that
+        // lands while we are reading is never lost. The notification count is
+        // only a wakeup hint — completeness is decided by the slice data
+        // actually present in Redis, so a duplicate notification (a slice seen
+        // by both the read below and a pub/sub event) cannot make us declare a
+        // not-yet-written slice "ready".
+        let mut rx = self.notifier.register_job(job_id);
 
-        // Pre-read slices that workers already stored before we subscribed.
-        for i in 0..total_slices {
-            if let Ok(Some(s)) = self.read_slice(job_id, i).await {
-                stats[i] = s;
-                self.notifier.notify_slice(job_id);
-            }
-        }
-
-        let ok = self
-            .notifier
-            .wait_for_all_slices(job_id, total_slices, self.slice_timeout)
-            .await;
-        self.notifier.unregister_job(job_id);
-
-        if !ok {
-            warn!("Timeout waiting for slices for job {}", job_id);
-            return Err(anyhow!("Timeout waiting for slices for job {}", job_id));
-        }
-
-        // Read any slices that arrived purely via pub/sub (not pre-read above).
-        for i in 0..total_slices {
-            if stats[i].exp_values.is_empty() {
-                match self.read_slice(job_id, i).await {
-                    Ok(Some(s)) => stats[i] = s,
-                    _ => {
-                        error!("Failed to read slice {} for job {}", i, job_id);
-                        return Err(anyhow!("Failed to read slice {} for job {}", i, job_id));
+        let deadline = Instant::now() + self.slice_timeout;
+        let outcome = loop {
+            // Read every slice we do not yet hold.
+            for i in 0..total_slices {
+                if !have[i] {
+                    if let Ok(Some(s)) = self.read_slice(job_id, i).await {
+                        stats[i] = s;
+                        have[i] = true;
+                        remaining -= 1;
                     }
                 }
             }
-        }
+            if remaining == 0 {
+                break Ok(());
+            }
 
-        info!("All {} slices ready for job {}", total_slices, job_id);
-        Ok(stats)
+            let now = Instant::now();
+            if now >= deadline {
+                break Err(anyhow!("Timeout waiting for slices for job {}", job_id));
+            }
+            // Wait for the next notification, but re-poll at least every 100 ms
+            // so a missed wakeup can never wedge us until the full timeout.
+            let step = (deadline - now).min(Duration::from_millis(100));
+            let _ = timeout(step, rx.changed()).await;
+        };
+
+        self.notifier.unregister_job(job_id);
+
+        match outcome {
+            Ok(()) => {
+                info!("All {} slices ready for job {}", total_slices, job_id);
+                Ok(stats)
+            }
+            Err(e) => {
+                warn!("{}", e);
+                Err(e)
+            }
+        }
     }
 
     async fn read_slice(&self, job_id: &str, idx: usize) -> Result<Option<SliceStats>> {

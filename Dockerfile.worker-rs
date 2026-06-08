@@ -31,8 +31,13 @@ RUN cd worker-rs && cargo build --release
 # and libnvrtc.so for JIT kernel compilation at runtime.
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
+# libzmq5 for the ZMQ transport; libnccl2 for zmq_nccl mode (NCCL AllReduce).
+# cudarc 0.19 dlopen()s "libnccl.so" but the runtime package only ships
+# "libnccl.so.2", so add the unversioned symlink it searches for.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libzmq5 \
+    libzmq5 libnccl2 \
+    && ln -sf /usr/lib/x86_64-linux-gnu/libnccl.so.2 /usr/lib/x86_64-linux-gnu/libnccl.so \
+    && ldconfig \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/worker-rs/target/release/worker /usr/local/bin/worker

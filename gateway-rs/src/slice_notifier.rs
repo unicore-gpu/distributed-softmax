@@ -8,11 +8,13 @@
 ///     have been notified.  `watch` guarantees no missed updates even under
 ///     concurrent senders.
 ///
-/// Race-condition fix (identical to C++ version):
-///   Callers must:
-///     1. `register_job(job_id, total)`
-///     2. Pre-scan Redis and call `notify_slice(job_id)` for each found slice.
-///     3. `wait_for_all_slices(...)` — returns immediately if already complete.
+/// Usage:
+///   1. `let rx = register_job(job_id)` before dispatching slices, so no
+///      notification is missed.
+///   2. On each `rx.changed()`, re-read the slices from Redis; the count is
+///      only a wakeup hint — completeness is decided by the data actually
+///      present, so duplicate notifications are harmless.
+///   3. `unregister_job(job_id)` when done.
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,14 +22,13 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use redis::Client;
 use tokio::sync::watch;
-use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 struct JobState {
-    /// Current count of notified slices.
+    /// Bumped once per slice notification. Used only as a wakeup signal — the
+    /// aggregator decides completeness from the slice data in Redis, so an
+    /// over-count (e.g. a slice seen both by pre-read and pub/sub) is harmless.
     count_tx: watch::Sender<usize>,
-    #[allow(dead_code)]
-    total: usize,
 }
 
 pub struct SliceNotifier {
@@ -50,61 +51,19 @@ impl SliceNotifier {
         Ok(notifier)
     }
 
-    /// Register a job before dispatching slices so we never miss a pub/sub
-    /// notification that arrives before `wait_for_all_slices` is called.
-    pub fn register_job(&self, job_id: &str, total: usize) {
-        let (count_tx, _) = watch::channel(0usize);
-        self.jobs.insert(
-            job_id.to_string(),
-            Arc::new(JobState { count_tx, total }),
-        );
+    /// Register a job before dispatching slices and return a receiver that
+    /// fires on every slice notification. Registering before dispatch
+    /// guarantees we never miss a notification that arrives before the
+    /// aggregator starts waiting.
+    pub fn register_job(&self, job_id: &str) -> watch::Receiver<usize> {
+        let (count_tx, count_rx) = watch::channel(0usize);
+        self.jobs
+            .insert(job_id.to_string(), Arc::new(JobState { count_tx }));
+        count_rx
     }
 
     pub fn unregister_job(&self, job_id: &str) {
         self.jobs.remove(job_id);
-    }
-
-    /// Increment the received-slice counter for a job.
-    /// Called by:
-    ///   - The background subscriber (pub/sub message).
-    ///   - The aggregator during its pre-scan of Redis (race-condition fix).
-    pub fn notify_slice(&self, job_id: &str) {
-        if let Some(state) = self.jobs.get(job_id) {
-            state.count_tx.send_modify(|v| *v += 1);
-        }
-    }
-
-    /// Block until all `total_slices` arrive, or until `timeout_duration` elapses.
-    /// Returns `true` on success, `false` on timeout.
-    pub async fn wait_for_all_slices(
-        &self,
-        job_id: &str,
-        total_slices: usize,
-        timeout_duration: Duration,
-    ) -> bool {
-        // Clone the Arc so we don't hold the DashMap shard lock across awaits.
-        let state = match self.jobs.get(job_id) {
-            Some(entry) => entry.value().clone(),
-            None => return false,
-        };
-
-        let result = timeout(timeout_duration, async move {
-            let mut rx = state.count_tx.subscribe();
-            loop {
-                // `borrow_and_update` marks current value as "seen".
-                // `changed()` then blocks until the value increases again.
-                if *rx.borrow_and_update() >= total_slices {
-                    return;
-                }
-                if rx.changed().await.is_err() {
-                    // Sender dropped (job unregistered concurrently) — treat as done
-                    return;
-                }
-            }
-        })
-        .await;
-
-        result.is_ok()
     }
 
     // ── Background subscriber ─────────────────────────────────────────────────

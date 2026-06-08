@@ -9,7 +9,7 @@
 /// no nvcc is required at build time. The compiled PTX is cached in the struct.
 ///
 /// Falls back to the CPU aggregator automatically if CUDA init fails.
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use cudarc::driver::{CudaContext, LaunchConfig, PushKernelArg};
@@ -24,6 +24,24 @@ pub struct GpuAggregator {
     ctx: Arc<CudaContext>,
     /// PTX compiled once and reused across requests.
     ptx: cudarc::nvrtc::Ptx,
+}
+
+// SAFETY: GpuAggregator holds an Arc<CudaContext> (thread-safe) and immutable
+// PTX bytes. Each aggregate() call allocates its own stream, so the single
+// shared instance is safe to use from multiple tokio worker threads.
+unsafe impl Send for GpuAggregator {}
+unsafe impl Sync for GpuAggregator {}
+
+static GPU_AGGREGATOR: OnceLock<Option<Arc<GpuAggregator>>> = OnceLock::new();
+
+/// Process-wide GpuAggregator, initialized exactly once (CUDA context creation
+/// + NVRTC compile). Returns `None` if no CUDA device is available, so callers
+/// transparently fall back to the CPU aggregator. Reused across all requests —
+/// avoids re-initializing CUDA and recompiling the kernel on every call.
+pub fn global(device_id: usize) -> Option<Arc<GpuAggregator>> {
+    GPU_AGGREGATOR
+        .get_or_init(|| GpuAggregator::try_new(device_id).map(Arc::new))
+        .clone()
 }
 
 impl GpuAggregator {
@@ -58,7 +76,8 @@ impl GpuAggregator {
             return Ok(vec![]);
         }
 
-        let stream = self.ctx.default_stream();
+        // A fresh stream per call keeps concurrent aggregations independent.
+        let stream = self.ctx.new_stream()?;
 
         // ── CPU: O(num_slices) global reduce ─────────────────────────────────
         let global_max = stats
