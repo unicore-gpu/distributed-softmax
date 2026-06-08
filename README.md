@@ -1,5 +1,7 @@
 # Distributed Softmax Service
 
+**English** · [中文](README.zh.md) · [日本語](README.ja.md)
+
 A production-grade distributed softmax computation service.  
 Vectors are sliced, dispatched to GPU workers, and aggregated using a numerically correct two-pass algorithm — equivalent to running softmax on the full vector.
 
@@ -158,7 +160,7 @@ docker run -d --gpus all \
 | `NCCL_WORLD_SIZE` | `4` | Total number of GPU ranks |
 | `REDIS_HOST` | `localhost` | Redis hostname |
 | `REDIS_PORT` | `6379` | Redis port |
-| `NUM_WORKERS` | `4` | Max concurrent task goroutines |
+| `NUM_WORKERS` | `4` | Max concurrent in-flight slices |
 | `CUDA_DEVICE` | same as `NCCL_RANK` | GPU device index |
 | `RUST_LOG` | `info` | Log verbosity |
 
@@ -344,6 +346,6 @@ Alternatively, `ZMQ_GATEWAY_ADDR` + `ZMQ_BASE_PORT` auto-derives `tcp://{addr}:{
 | Ubuntu 24.04, CUDA 12.4, 4× RTX 4090, `zmq_nccl` world_size=4 | ✅ NCCL AllReduce, all sums = 1.0 |
 | Ubuntu 24.04, CUDA 13.1, 2× A100 SXM (NVLink12), `zmq_nccl` world_size=2 | ✅ N=1k–262k, all sums = 1.000000 |
 | Math correctness vs FP64 reference | ✅ max error < 1e-8 |
-| JetStream retry (worker kill + restart) | ✅ automatic recovery |
+| Worker retry (worker kill + restart) | ✅ automatic recovery |
 | 10 concurrent jobs, ZMQ mode | ✅ all sums = 1.0 |
 | Multi-node (2 nodes, direct IP routing) | ✅ supported by design — requires TCP reachability between nodes |
