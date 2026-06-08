@@ -164,13 +164,8 @@ This run measured a single 4×A100 node only; multi-machine numbers were not re-
 ## 6. Next Steps
 
 1. **Re-collect multi-machine numbers** on a direct-RDMA (InfiniBand/RoCE) fabric.
-2. **Pipeline parallelism** — process the next job while the current AllReduce is in flight.
-3. **Persistent CUDA streams** — reuse streams across jobs instead of allocating per job.
-4. **Repair the gateway GPU aggregation path** (`gpu_aggregator.rs`) against `cudarc` 0.19.4
-   so plain-`zmq` mode can also offload normalization to the GPU (see note below).
-
-> **Build caveat**: `gateway-rs/src/gpu_aggregator.rs` (the optional GPU aggregation used only in
-> plain `zmq` mode) does not currently compile against the pinned `cudarc` 0.19.4 — the source
-> targets an older `cudarc` API (`LaunchArgs::arg`/`PushKernelArg`, `memcpy_dtoh`,
-> `Arc<CudaContext>`). It does not affect `zmq_nccl` mode or the worker GPU path, both of which
-> build and run cleanly.
+2. **Benchmark plain-`zmq` mode with GPU aggregation** (`--features cuda`) — the gateway GPU
+   path (`gpu_aggregator.rs`) now builds against `cudarc` 0.19.4 and can be measured against the
+   CPU aggregator.
+3. **Pipeline parallelism** — process the next job while the current AllReduce is in flight.
+4. **Persistent CUDA streams** — reuse streams across jobs instead of allocating per job.

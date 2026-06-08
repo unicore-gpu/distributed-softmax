@@ -50,4 +50,6 @@ build.log
 target/
 worker-rs/target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is committed: gateway-rs and worker-rs are binary crates, so the
+# lockfile is pinned for reproducible builds (a floating cudarc previously broke
+# the GPU build).

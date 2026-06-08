@@ -193,7 +193,7 @@ rpc GetResult(ResultRequest) returns (ResultResponse)
 ```bash
 grpcurl -plaintext -import-path proto -proto vector_service.proto \
   -d '{"job_id": "job-1", "task": "softmax", "vector": [1.0, 2.0, 3.0, 4.0, 5.0]}' \
-  localhost:50051 vector_service.VectorService/SubmitTask
+  localhost:50051 vector.VectorService/SubmitTask
 # → returns probabilities summing to 1.0 directly in the response
 ```
 

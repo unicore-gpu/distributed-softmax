@@ -36,6 +36,9 @@ pub struct GatewayService {
     notifier: Arc<SliceNotifier>,
     publisher: Arc<dyn Publisher>,
     nccl_dispatch: bool,
+    /// Number of GPU ranks in NCCL mode; each job must produce exactly this
+    /// many non-empty slices so every rank participates in the AllReduce.
+    world_size: usize,
 }
 
 impl GatewayService {
@@ -44,14 +47,33 @@ impl GatewayService {
         notifier: Arc<SliceNotifier>,
         publisher: Arc<dyn Publisher>,
         nccl_dispatch: bool,
+        world_size: usize,
     ) -> Self {
         Self {
             redis,
             notifier,
             publisher,
             nccl_dispatch,
+            world_size,
         }
     }
+}
+
+/// Split `data` into exactly `n` contiguous, non-empty, as-even-as-possible
+/// chunks. Requires `data.len() >= n`. The first `len % n` chunks are one
+/// element larger than the rest.
+fn even_chunks(data: &[f64], n: usize) -> Vec<Vec<f64>> {
+    let len = data.len();
+    let base = len / n;
+    let rem = len % n;
+    let mut out = Vec::with_capacity(n);
+    let mut start = 0;
+    for i in 0..n {
+        let take = base + if i < rem { 1 } else { 0 };
+        out.push(data[start..start + take].to_vec());
+        start += take;
+    }
+    out
 }
 
 #[tonic::async_trait]
@@ -73,9 +95,26 @@ impl VectorService for GatewayService {
             return Err(Status::invalid_argument("empty input vector"));
         }
 
-        let num_slices = num_slices();
-        let slice_size = (vector_size + num_slices - 1) / num_slices;
-        let total_slices = (vector_size + slice_size - 1) / slice_size;
+        // Slice the vector. In NCCL mode every rank must receive exactly one
+        // non-empty slice — all ranks participate in each AllReduce, so a job
+        // that yields fewer slices than ranks would stall the collective and
+        // desync the pipeline. Split into exactly `world_size` even chunks and
+        // reject vectors too short to give every rank data.
+        let slices: Vec<Vec<f64>> = if self.nccl_dispatch {
+            if vector_size < self.world_size {
+                return Err(Status::invalid_argument(format!(
+                    "vector length {} < world_size {}: cannot give every GPU rank a \
+                     non-empty slice in NCCL mode",
+                    vector_size, self.world_size
+                )));
+            }
+            even_chunks(&vector, self.world_size)
+        } else {
+            let num_slices = num_slices();
+            let slice_size = (vector_size + num_slices - 1) / num_slices;
+            vector.chunks(slice_size).map(|c| c.to_vec()).collect()
+        };
+        let total_slices = slices.len();
 
         // Store job metadata in Redis.
         let now = SystemTime::now()
@@ -94,9 +133,8 @@ impl VectorService for GatewayService {
             return Err(Status::internal("Failed to store job metadata"));
         }
 
-        // Slice the vector and publish each slice to the message bus.
-        for (slice_id, chunk) in vector.chunks(slice_size).enumerate() {
-            let data: Vec<f64> = chunk.to_vec();
+        // Publish each slice to the message bus.
+        for (slice_id, data) in slices.iter().enumerate() {
             let msg = serde_json::json!({
                 "job_id":   req.job_id,
                 "slice_id": slice_id,

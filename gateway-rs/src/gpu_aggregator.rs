@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use cudarc::driver::{CudaContext, LaunchConfig};
+use cudarc::driver::{CudaContext, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::compile_ptx;
 use tracing::{info, warn};
 
@@ -43,12 +43,10 @@ impl GpuAggregator {
     }
 
     fn init(device_id: usize) -> Result<Self> {
+        // CudaContext::new() already returns Arc<CudaContext> — no extra Arc::new.
         let ctx = CudaContext::new(device_id).context("CudaContext::new")?;
         let ptx = compile_ptx(KERNEL_SRC).context("NVRTC compile_ptx")?;
-        Ok(Self {
-            ctx: Arc::new(ctx),
-            ptx,
-        })
+        Ok(Self { ctx, ptx })
     }
 
     /// Aggregate partial slice statistics into final softmax probabilities on GPU.
@@ -95,28 +93,30 @@ impl GpuAggregator {
         }
 
         // ── Upload to GPU ─────────────────────────────────────────────────────
-        let exp_vals_dev = stream.memcpy_stod(&exp_vals_host)?;
-        let adjusts_dev = stream.memcpy_stod(&adjusts)?;
-        let slice_ids_dev = stream.memcpy_stod(&slice_ids_host)?;
+        let exp_vals_dev = stream.clone_htod(&exp_vals_host)?;
+        let adjusts_dev = stream.clone_htod(&adjusts)?;
+        let slice_ids_dev = stream.clone_htod(&slice_ids_host)?;
         let mut out_dev = stream.alloc_zeros::<f32>(total)?;
 
         // ── Launch kernel ─────────────────────────────────────────────────────
         let module = self.ctx.load_module(self.ptx.clone())?;
         let kernel = module.load_function(KERNEL_NAME)?;
 
+        let total_i32 = total as i32;
         let mut launcher = stream.launch_builder(&kernel);
         launcher.arg(&exp_vals_dev);
         launcher.arg(&adjusts_dev);
         launcher.arg(&slice_ids_dev);
         launcher.arg(&mut out_dev);
         launcher.arg(&inv_global_sum);
-        launcher.arg(&(total as i32));
+        launcher.arg(&total_i32);
 
         // SAFETY: kernel reads only its declared inputs and writes only `out`.
         unsafe { launcher.launch(LaunchConfig::for_num_elems(total as u32)) }?;
 
         // ── Download result ───────────────────────────────────────────────────
-        let result = stream.memcpy_dtoh(&out_dev)?;
+        let mut result = vec![0.0f32; total];
+        stream.memcpy_dtoh(&out_dev, &mut result)?;
         Ok(result)
     }
 }

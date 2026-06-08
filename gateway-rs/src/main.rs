@@ -43,16 +43,14 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Message bus ───────────────────────────────────────────────────────────
     let nccl_dispatch = transport == "zmq_nccl";
+    let world_size: usize = env::var("NCCL_WORLD_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or(4);
     let publisher: Arc<dyn Publisher> = match transport.as_str() {
         "zmq" => Arc::new(ZmqPublisher::new()?),
-        "zmq_nccl" => {
-            let world_size: usize = env::var("NCCL_WORLD_SIZE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|&n: &usize| n > 0)
-                .unwrap_or(4);
-            Arc::new(ZmqMultiPublisher::new(world_size)?)
-        }
+        "zmq_nccl" => Arc::new(ZmqMultiPublisher::new(world_size)?),
         other => anyhow::bail!("unknown TRANSPORT '{}' (valid: zmq | zmq_nccl)", other),
     };
 
@@ -70,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     cache_manager::spawn(redis.clone(), 15);
 
     // ── gRPC service ──────────────────────────────────────────────────────────
-    let service = GatewayService::new(redis, notifier, publisher, nccl_dispatch);
+    let service = GatewayService::new(redis, notifier, publisher, nccl_dispatch, world_size);
 
     info!("Configuration:");
     info!("  Result TTL:   {}s", RedisConfig::result_ttl());
